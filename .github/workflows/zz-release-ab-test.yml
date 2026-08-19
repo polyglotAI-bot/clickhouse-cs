@@ -1,0 +1,101 @@
+name: zz release A/B test
+
+# Scratch workflow, fork only. Runs the current ncipollo/release-action step and the
+# proposed `gh release create` replacement side by side, from an identical artifact and
+# an identical job shape (no checkout, artifact downloaded into the working directory),
+# so the two resulting releases can be diffed field by field.
+#
+# The NuGet push is deliberately not reproduced.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Base tag; each job appends its own suffix
+        required: true
+        type: string
+
+jobs:
+  # Stands in for the `sign` job: produces the same artifact name, path pattern and
+  # file names the real pipeline hands to the release job.
+  make_packages:
+    name: Fabricate packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create dummy packages
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p package
+          echo "dummy nupkg for $VERSION"  > "package/ClickHouse.Driver.${VERSION}.nupkg"
+          echo "dummy snupkg for $VERSION" > "package/ClickHouse.Driver.${VERSION}.snupkg"
+          ls -l package
+
+      - name: Upload signed package
+        uses: actions/upload-artifact@v7
+        with:
+          name: package
+          path: package/ClickHouse.Driver.*nupkg
+
+  # CONTROL: byte-for-byte the github_release job on main today.
+  release_ncipollo:
+    name: A - ncipollo
+    runs-on: ubuntu-latest
+    needs: [make_packages]
+    permissions:
+      contents: write
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: package
+      - name: Create Release
+        id: create_release
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
+        with:
+          artifacts: "*.nupkg,*.snupkg"
+          commit: ${{ github.sha }}
+          tag: ${{ inputs.version }}-ncipollo
+          generateReleaseNotes: true
+          draft: false
+          prerelease: false
+
+  # CANDIDATE: the proposed replacement.
+  release_gh:
+    name: B - gh release
+    runs-on: ubuntu-latest
+    needs: [make_packages]
+    permissions:
+      contents: write
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: package
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}-gh
+        run: gh release create "$VERSION" --target "$GITHUB_SHA" --generate-notes *.nupkg *.snupkg
+
+  # Negative control: prove what happens when a glob matches nothing, which is the one
+  # behavioural difference (ncipollo tolerates it, gh does not).
+  release_gh_missing_glob:
+    name: C - gh release, unmatched glob
+    runs-on: ubuntu-latest
+    needs: [make_packages]
+    permissions:
+      contents: write
+    continue-on-error: true
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: package
+      - name: Create Release with a glob that matches nothing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}-gh-missing
+        run: gh release create "$VERSION" --target "$GITHUB_SHA" --generate-notes *.nupkg *.nosuchext
